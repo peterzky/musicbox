@@ -16,6 +16,7 @@ import signal
 import webbrowser
 import locale
 from collections import namedtuple
+from multiprocessing import Event
 
 from future.builtins import range, str
 
@@ -28,7 +29,6 @@ from .utils import notify
 from .storage import Storage
 from .cache import Cache
 from . import logger
-
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -121,6 +121,10 @@ class Menu(object):
         self.countdown_start = time.time()
         self.countdown = -1
         self.is_in_countdown = False
+        # mpris event
+        self.mpris_play_pause = Event()
+        self.mpris_next_song = Event()
+        self.mpris_previous_song = Event()
 
     @property
     def user(self):
@@ -163,12 +167,14 @@ class Menu(object):
 
     def search(self, category):
         self.ui.screen.timeout(-1)
-        SearchArg = namedtuple("SearchArg", ["prompt", "api_type", "post_process"])
+        SearchArg = namedtuple("SearchArg",
+                               ["prompt", "api_type", "post_process"])
         category_map = {
             "songs": SearchArg("搜索歌曲：", 1, lambda datalist: datalist),
             "albums": SearchArg("搜索专辑：", 10, lambda datalist: datalist),
             "artists": SearchArg("搜索艺术家：", 100, lambda datalist: datalist),
-            "playlists": SearchArg("搜索网易精选集：", 1000, lambda datalist: datalist),
+            "playlists": SearchArg("搜索网易精选集：",
+                                   1000, lambda datalist: datalist),
         }
 
         prompt, api_type, post_process = category_map[category]
@@ -200,10 +206,8 @@ class Menu(object):
             notify("MusicBox Update is available", 1)
             time.sleep(0.5)
             notify(
-                "NetEase-MusicBox installed version:"
-                + version
-                + "\nNetEase-MusicBox latest version:"
-                + latest,
+                "NetEase-MusicBox installed version:" + version +
+                "\nNetEase-MusicBox latest version:" + latest,
                 0,
             )
 
@@ -248,6 +252,12 @@ class Menu(object):
             return
         self.player.prev()
 
+    # mpris handler
+    def mpris_control(self, control):
+        if (eval(f"self.mpris_{control}.is_set()")):
+            eval(f"self.{control}")
+            eval(f"self.mpris_{control}.clear()")
+
     def start(self):
         self.menu_starts = time.time()
         self.ui.build_menu(
@@ -259,11 +269,15 @@ class Menu(object):
             self.step,
             self.menu_starts,
         )
-        self.stack.append(
-            [self.datatype, self.title, self.datalist, self.offset, self.index]
-        )
+        self.stack.append([
+            self.datatype, self.title, self.datalist, self.offset, self.index
+        ])
 
         show_lyrics_new_process()
+
+        # mpris D-bus process
+        mpris_start(self.mpris_play_pause, self.mpris_next_song,
+                    self.mpris_previous_song)
         while True:
             datatype = self.datatype
             title = self.title
@@ -274,6 +288,11 @@ class Menu(object):
             self.screen.timeout(500)
             key = self.screen.getch()
             self.ui.screen.refresh()
+
+            # mpris
+            self.mpris_control("play_pause")
+            self.mpris_control("next_song")
+            self.mpris_control("previous_song")
 
             # term resize
             if key == -1:
@@ -303,8 +322,8 @@ class Menu(object):
                     self.index = offset - 1
                 else:
                     self.index = carousel(
-                        offset, min(len(datalist), offset + step) - 1, idx - 1
-                    )
+                        offset,
+                        min(len(datalist), offset + step) - 1, idx - 1)
                 self.menu_starts = time.time()
 
             # 下移
@@ -318,8 +337,8 @@ class Menu(object):
                     self.index = offset + step
                 else:
                     self.index = carousel(
-                        offset, min(len(datalist), offset + step) - 1, idx + 1
-                    )
+                        offset,
+                        min(len(datalist), offset + step) - 1, idx + 1)
                 self.menu_starts = time.time()
 
             # 数字快捷键
@@ -414,7 +433,8 @@ class Menu(object):
 
             # 喜爱
             elif key == ord(","):
-                return_data = self.request_api(self.api.fm_like, self.player.playing_id)
+                return_data = self.request_api(self.api.fm_like,
+                                               self.player.playing_id)
                 if return_data:
                     song_name = self.player.playing_name
                     notify("%s added successfully!" % song_name, 0)
@@ -427,9 +447,8 @@ class Menu(object):
                     if len(self.player.info["player_list"]) == 0:
                         continue
                     self.player.next()
-                    return_data = self.request_api(
-                        self.api.fm_trash, self.player.playing_id
-                    )
+                    return_data = self.request_api(self.api.fm_trash,
+                                                   self.player.playing_id)
                     if return_data:
                         notify("Deleted successfully!", 0)
 
@@ -451,29 +470,29 @@ class Menu(object):
 
                 # If change to a new playing list. Add playing list and play.
                 if datatype == "songs":
-                    self.player.new_player_list("songs", self.title, self.datalist, -1)
+                    self.player.new_player_list("songs", self.title,
+                                                self.datalist, -1)
                     self.player.end_callback = None
                     self.player.play_or_pause(idx, self.at_playing_list)
                     self.at_playing_list = True
                 elif datatype == "djchannels":
-                    self.player.new_player_list(
-                        "djchannels", self.title, self.datalist, -1
-                    )
+                    self.player.new_player_list("djchannels", self.title,
+                                                self.datalist, -1)
                     self.player.end_callback = None
                     self.player.play_or_pause(idx, self.at_playing_list)
                     self.at_playing_list = True
                 elif datatype == "fmsongs":
                     self.player.change_mode(0)
-                    self.player.new_player_list(
-                        "fmsongs", self.title, self.datalist, -1
-                    )
+                    self.player.new_player_list("fmsongs", self.title,
+                                                self.datalist, -1)
                     self.player.end_callback = self.fm_callback
                     self.player.play_or_pause(idx, self.at_playing_list)
                     self.at_playing_list = True
                 else:
                     # 所在列表类型不是歌曲
                     isNotSongs = True
-                    self.player.play_or_pause(self.player.info["idx"], isNotSongs)
+                    self.player.play_or_pause(self.player.info["idx"],
+                                              isNotSongs)
 
             # 加载当前播放列表
             elif key == ord("p"):
@@ -499,7 +518,8 @@ class Menu(object):
                 else:
                     album_id = 0
                 if album_id:
-                    self.stack.append([datatype, title, datalist, offset, self.index])
+                    self.stack.append(
+                        [datatype, title, datalist, offset, self.index])
                     songs = self.api.album(album_id)
                     self.datatype = "songs"
                     self.datalist = self.api.dig_info(songs, "songs")
@@ -519,7 +539,8 @@ class Menu(object):
 
             # 加载打碟歌单
             elif key == ord("z"):
-                self.stack.append([datatype, title, datalist, offset, self.index])
+                self.stack.append(
+                    [datatype, title, datalist, offset, self.index])
                 self.datatype = "songs"
                 self.title = "网易云音乐 > 打碟"
                 self.datalist = self.djstack
@@ -528,15 +549,15 @@ class Menu(object):
 
             # 添加到本地收藏
             elif key == ord("s"):
-                if (datatype == "songs" or datatype == "djchannels") and len(
-                    datalist
-                ) != 0:
+                if (datatype == "songs"
+                        or datatype == "djchannels") and len(datalist) != 0:
                     self.collection.append(datalist[idx])
                     notify("Added successfully", 0)
 
             # 加载本地收藏
             elif key == ord("c"):
-                self.stack.append([datatype, title, datalist, offset, self.index])
+                self.stack.append(
+                    [datatype, title, datalist, offset, self.index])
                 self.datatype = "songs"
                 self.title = "网易云音乐 > 本地收藏"
                 self.datalist = self.collection
@@ -545,14 +566,12 @@ class Menu(object):
 
             # 从当前列表移除
             elif key == ord("r"):
-                if (
-                    datatype in ("songs", "djchannels", "fmsongs")
-                    and len(datalist) != 0
-                ):
+                if (datatype in ("songs", "djchannels", "fmsongs")
+                        and len(datalist) != 0):
                     self.datalist.pop(idx)
                     self.index = carousel(
-                        offset, min(len(datalist), offset + step) - 1, idx
-                    )
+                        offset,
+                        min(len(datalist), offset + step) - 1, idx)
 
             elif key == ord("t"):
                 self.countdown_start = time.time()
@@ -563,7 +582,8 @@ class Menu(object):
 
                 countdown = int(countdown)
                 if countdown > 0:
-                    notify("The musicbox will exit in {} minutes".format(countdown))
+                    notify("The musicbox will exit in {} minutes".format(
+                        countdown))
                     self.countdown = countdown * 60
                     self.is_in_countdown = True
                 else:
@@ -572,11 +592,8 @@ class Menu(object):
 
             # 当前项目下移
             elif key == ord("J"):
-                if (
-                    datatype != "main"
-                    and len(datalist) != 0
-                    and idx + 1 != len(self.datalist)
-                ):
+                if (datatype != "main" and len(datalist) != 0
+                        and idx + 1 != len(self.datalist)):
                     self.menu_starts = time.time()
                     song = self.datalist.pop(idx)
                     self.datalist.insert(idx + 1, song)
@@ -598,7 +615,8 @@ class Menu(object):
 
             elif key == ord("m"):
                 if datatype != "main":
-                    self.stack.append([datatype, title, datalist, offset, self.index])
+                    self.stack.append(
+                        [datatype, title, datalist, offset, self.index])
                     self.datatype = self.stack[0][0]
                     self.title = self.stack[0][1]
                     self.datalist = self.stack[0][2]
@@ -607,7 +625,8 @@ class Menu(object):
 
             elif key == ord("g"):
                 if datatype == "help":
-                    webbrowser.open_new_tab("https://github.com/darknessomi/musicbox")
+                    webbrowser.open_new_tab(
+                        "https://github.com/darknessomi/musicbox")
                 else:
                     self.index = 0
                     self.offset = 0
@@ -621,15 +640,16 @@ class Menu(object):
                 s = self.datalist[idx]
                 cache_thread = threading.Thread(
                     target=self.player.cache_song,
-                    args=(s["song_id"], s["song_name"], s["artist"], s["mp3_url"]),
+                    args=(s["song_id"], s["song_name"], s["artist"],
+                          s["mp3_url"]),
                 )
                 cache_thread.start()
 
             elif key == ord("i"):
                 if self.player.playing_id != -1:
                     webbrowser.open_new_tab(
-                        "http://music.163.com/song?id={}".format(self.player.playing_id)
-                    )
+                        "http://music.163.com/song?id={}".format(
+                            self.player.playing_id))
 
             self.ui.build_process_bar(
                 self.player.current_song,
@@ -677,8 +697,14 @@ class Menu(object):
             self.datatype = "artist_info"
             self.title += " > " + artist_name
             self.datalist = [
-                {"item": "{}的热门歌曲".format(artist_name), "id": artist_id},
-                {"item": "{}的所有专辑".format(artist_name), "id": artist_id},
+                {
+                    "item": "{}的热门歌曲".format(artist_name),
+                    "id": artist_id
+                },
+                {
+                    "item": "{}的所有专辑".format(artist_name),
+                    "id": artist_id
+                },
             ]
 
         elif datatype == "artist_info":
@@ -738,7 +764,8 @@ class Menu(object):
             data = self.datalist[idx]
             self.datatype = "top_playlists"
             log.error(data)
-            self.datalist = netease.dig_info(netease.top_playlists(data), self.datatype)
+            self.datalist = netease.dig_info(
+                netease.top_playlists(data), self.datatype)
             self.title += " > " + data
 
         # 歌曲评论
@@ -752,14 +779,11 @@ class Menu(object):
                 hotcomments = comcomments = []
             self.datalist = []
             for one_comment in hotcomments:
-                self.datalist.append(
-                    "(热评 %s❤️ ️)%s:%s"
-                    % (
-                        one_comment["likedCount"],
-                        one_comment["user"]["nickname"],
-                        one_comment["content"],
-                    )
-                )
+                self.datalist.append("(热评 %s❤️ ️)%s:%s" % (
+                    one_comment["likedCount"],
+                    one_comment["user"]["nickname"],
+                    one_comment["content"],
+                ))
             for one_comment in comcomments:
                 self.datalist.append(one_comment["content"])
             self.datatype = "comments"
@@ -795,14 +819,17 @@ class Menu(object):
             return
 
         if not self.at_playing_list:
-            self.stack.append(
-                [self.datatype, self.title, self.datalist, self.offset, self.index]
-            )
+            self.stack.append([
+                self.datatype, self.title, self.datalist, self.offset,
+                self.index
+            ])
             self.at_playing_list = True
 
         self.datatype = self.player.info["player_list_type"]
         self.title = self.player.info["player_list_title"]
-        self.datalist = [self.player.songs[i] for i in self.player.info["player_list"]]
+        self.datalist = [
+            self.player.songs[i] for i in self.player.info["player_list"]
+        ]
         self.index = self.player.info["idx"]
         self.offset = self.index // self.step * self.step
 
